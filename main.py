@@ -7,20 +7,31 @@ from app.core.database import engine
 from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.init_db import ensure_database_exists, seed_default_admin
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
     try:
+        # 1. Ensure target database exists in PostgreSQL
+        await ensure_database_exists()
+
+        # 2. Test connection and create missing tables
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
 
         print(" PostgreSQL connected successfully")
-         # Create tables
+
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
+        print(" Database tables verified/created successfully")
+
+        # 3. Seed default Admin user
+        await seed_default_admin()
+
     except Exception as e:
-        print(f"PostgreSQL connection failed: {e}")
+        print(f"PostgreSQL initialization failed: {e}")
 
     yield
 
