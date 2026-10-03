@@ -30,6 +30,7 @@ class CameraRepository:
             desired_state=camera_data.desired_state,
             status=status,
             source_type=camera_data.source_type,
+            thumbnail_url=camera_data.thumbnail_url,
             created_by=created_by,
         )
 

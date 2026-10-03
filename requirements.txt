@@ -11,3 +11,4 @@ python-jose[cryptography]
 passlib[bcrypt]
 opencv-python-headless
 numpy
+cloudinary

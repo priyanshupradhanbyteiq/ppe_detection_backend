@@ -11,6 +11,7 @@ from app.schemas.camera import (
     RTSPValidateRequest,
     RTSPValidateResponse,
 )
+from app.services.cloudinary_service import cloudinary_service
 from app.services.rtsp_validator_service import rtsp_validator_service
 
 
@@ -18,6 +19,7 @@ class CameraService:
     def __init__(self, repository: CameraRepository):
         self.repository = repository
         self.rtsp_validator = rtsp_validator_service
+        self.cloudinary = cloudinary_service
 
     async def validate_rtsp_link(
         self,
@@ -59,7 +61,10 @@ class CameraService:
         created_by: Optional[UUID] = None,
     ) -> CameraResponse:
         """
-        Registers a new camera. If verify_stream_first=True, it tests the RTSP stream first.
+        Registers a new camera:
+        1. Tests RTSP stream connectivity & streams for 5 seconds.
+        2. Captures 5th-second stabilized snapshot & uploads to Cloudinary.
+        3. Saves camera with thumbnail_url to PostgreSQL.
         """
         initial_status = "ONLINE"
 
@@ -73,6 +78,16 @@ class CameraService:
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"Cannot register camera. RTSP stream is invalid: {probe.get('error')}",
                 )
+
+            # Upload 5th-second stabilized video snapshot to Cloudinary
+            snapshot_frame = probe.get("frame")
+            if snapshot_frame is not None:
+                cloudinary_thumb_url = await self.cloudinary.upload_thumbnail(
+                    frame=snapshot_frame,
+                    camera_name=camera_data.name,
+                )
+                if cloudinary_thumb_url:
+                    camera_data.thumbnail_url = cloudinary_thumb_url
 
         camera = await self.repository.create(
             camera_data=camera_data,

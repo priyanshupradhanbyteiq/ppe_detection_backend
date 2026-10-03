@@ -105,7 +105,10 @@ class Camera(Base):
         nullable=False,
     )
 
-    
+    thumbnail_url: Mapped[Optional[str]] = mapped_column(
+        String(500),
+        nullable=True,
+    )
 
     # Relationships
     creator = relationship("User", backref="cameras", lazy="selectin")

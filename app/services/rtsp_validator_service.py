@@ -1,22 +1,26 @@
 import asyncio
 import os
 import socket
+import time
 from typing import Any, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 import cv2
+import numpy as np
 
 
 class RTSPValidatorService:
     """
-    Asynchronously validates live RTSP/video stream URLs using OpenCV
-    with TCP socket pre-probing and strict non-blocking timeout enforcement.
+    Asynchronously validates live RTSP/video stream URLs using OpenCV.
+    - Runs fast TCP socket pre-probing.
+    - Streams and verifies feed for a continuous 5-second interval.
+    - Captures the stabilized 5th-second video snapshot for Cloudinary thumbnail storage.
     """
 
     ALLOWED_SCHEMES = {"rtsp", "rtsps", "http", "https"}
 
-    def __init__(self, default_timeout_seconds: int = 5):
-        self.default_timeout_seconds = default_timeout_seconds
+    def __init__(self, default_duration_seconds: int = 5):
+        self.default_duration_seconds = default_duration_seconds
 
     def parse_and_validate_url(self, rtsp_url: str) -> Tuple[str, str, int]:
         """
@@ -55,12 +59,17 @@ class RTSPValidatorService:
         except Exception as e:
             return False, f"Cannot reach '{host}:{port}': {str(e)}"
 
-    def _probe_stream_sync(self, rtsp_url: str, timeout_seconds: int) -> Dict[str, Any]:
+    def _probe_stream_sync(
+        self,
+        rtsp_url: str,
+        duration_seconds: float = 5.0,
+    ) -> Dict[str, Any]:
         """
-        Connects, opens, and reads test frame from the stream using OpenCV.
+        Connects, continuously reads frames for 5 seconds, and captures
+        the 5th-second stabilized snapshot.
         Runs inside a thread pool to prevent blocking the async event loop.
         """
-        timeout_us = int(timeout_seconds * 1_000_000)
+        timeout_us = int(duration_seconds * 1_000_000)
         os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = (
             f"rtsp_transport;tcp|stimeout;{timeout_us}|timeout;{timeout_us}"
         )
@@ -71,6 +80,7 @@ class RTSPValidatorService:
             if not cap.isOpened():
                 return {
                     "is_valid": False,
+                    "frame": None,
                     "resolution": None,
                     "fps": None,
                     "width": None,
@@ -78,26 +88,60 @@ class RTSPValidatorService:
                     "error": "Failed to open RTSP stream. Check credentials (username/password) or RTSP path.",
                 }
 
-            # Attempt to read at least 1 valid frame
-            ret, frame = cap.read()
-            if not ret or frame is None:
+            start_time = time.time()
+            frames_read = 0
+            latest_frame: Optional[np.ndarray] = None
+
+            # Stream continuously across the 5-second interval
+            while True:
+                ret, frame = cap.read()
+                if not ret or frame is None:
+                    # If stream drops immediately before reaching 1s
+                    if frames_read == 0:
+                        return {
+                            "is_valid": False,
+                            "frame": None,
+                            "resolution": None,
+                            "fps": None,
+                            "width": None,
+                            "height": None,
+                            "error": "Connected to stream, but failed to decode video frames (empty or corrupt feed).",
+                        }
+                    break
+
+                frames_read += 1
+                latest_frame = frame
+
+                elapsed = time.time() - start_time
+                if elapsed >= duration_seconds:
+                    break
+
+            if latest_frame is None:
                 return {
                     "is_valid": False,
+                    "frame": None,
                     "resolution": None,
                     "fps": None,
                     "width": None,
                     "height": None,
-                    "error": "Connected to stream, but failed to decode video frames (empty or corrupt feed).",
+                    "error": "Failed to receive continuous video frames over the 5-second duration.",
                 }
 
-            height, width = frame.shape[:2]
+            # Clone the 5th second stabilized snapshot
+            snapshot_5s: np.ndarray = latest_frame.copy()
+            height, width = snapshot_5s.shape[:2]
             fps = cap.get(cv2.CAP_PROP_FPS) or 0.0
 
             if fps <= 0 or fps > 240:
                 fps = 30.0
 
+            actual_elapsed = round(time.time() - start_time, 2)
+
             return {
                 "is_valid": True,
+                "frame": snapshot_5s,
+                "stream_duration_verified": actual_elapsed,
+                "total_frames_sampled": frames_read,
                 "resolution": f"{width}x{height}",
                 "width": int(width),
                 "height": int(height),
@@ -108,11 +152,12 @@ class RTSPValidatorService:
         except Exception as e:
             return {
                 "is_valid": False,
+                "frame": None,
                 "resolution": None,
                 "fps": None,
                 "width": None,
                 "height": None,
-                "error": f"Error decoding stream: {str(e)}",
+                "error": f"Error decoding stream during 5-second check: {str(e)}",
             }
         finally:
             cap.release()
@@ -123,9 +168,9 @@ class RTSPValidatorService:
         timeout_seconds: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Asynchronously validates the RTSP stream URL with fast socket pre-flight and OpenCV frame check.
+        Asynchronously validates the RTSP stream over 5 seconds and captures the 5th-second frame.
         """
-        timeout = timeout_seconds or self.default_timeout_seconds
+        duration = float(timeout_seconds or self.default_duration_seconds)
 
         # 1. Syntax check
         try:
@@ -133,6 +178,7 @@ class RTSPValidatorService:
         except ValueError as e:
             return {
                 "is_valid": False,
+                "frame": None,
                 "resolution": None,
                 "fps": None,
                 "width": None,
@@ -142,11 +188,12 @@ class RTSPValidatorService:
 
         # 2. Fast Socket Pre-Check (1.5s timeout)
         is_reachable, socket_error = await asyncio.to_thread(
-            self._check_socket_reachability, host, port, min(timeout, 2.0)
+            self._check_socket_reachability, host, port, min(duration, 2.0)
         )
         if not is_reachable:
             return {
                 "is_valid": False,
+                "frame": None,
                 "resolution": None,
                 "fps": None,
                 "width": None,
@@ -154,24 +201,26 @@ class RTSPValidatorService:
                 "error": socket_error,
             }
 
-        # 3. OpenCV Stream Frame Probe
+        # 3. OpenCV 5-Second Stream Probe & 5th-Second Frame Capture
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(self._probe_stream_sync, rtsp_url, timeout),
-                timeout=timeout + 2.0,
+                asyncio.to_thread(self._probe_stream_sync, rtsp_url, duration),
+                timeout=duration + 3.0,
             )
         except asyncio.TimeoutError:
             return {
                 "is_valid": False,
+                "frame": None,
                 "resolution": None,
                 "fps": None,
                 "width": None,
                 "height": None,
-                "error": f"RTSP frame read timed out after {timeout} seconds.",
+                "error": f"RTSP stream reading timed out after {duration} seconds.",
             }
         except Exception as e:
             return {
                 "is_valid": False,
+                "frame": None,
                 "resolution": None,
                 "fps": None,
                 "width": None,

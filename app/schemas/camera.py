@@ -16,6 +16,7 @@ class CameraBase(BaseModel):
     ppe_enabled: bool = Field(True, description="Enable PPE hazard detection")
     fire_enabled: bool = Field(False, description="Enable Fire hazard detection")
     smoke_enabled: bool = Field(False, description="Enable Smoke hazard detection")
+    thumbnail_url: Optional[str] = Field(None, max_length=500, description="Cloudinary live preview thumbnail URL")
 
 
 # ==========================================
@@ -38,6 +39,7 @@ class CameraUpdateRequest(BaseModel):
     smoke_enabled: Optional[bool] = None
     desired_state: Optional[str] = None
     status: Optional[str] = None
+    thumbnail_url: Optional[str] = None
 
 
 class CameraUploadRequest(BaseModel):
@@ -48,6 +50,7 @@ class CameraUploadRequest(BaseModel):
     ppe_enabled: bool = Field(True, description="Enable PPE hazard detection")
     fire_enabled: bool = Field(False, description="Enable Fire hazard detection")
     smoke_enabled: bool = Field(False, description="Enable Smoke hazard detection")
+    thumbnail_url: Optional[str] = None
 
 
 # Aliases for backward compatibility
@@ -65,6 +68,7 @@ class CameraResponse(CameraBase):
     desired_state: str
     status: str
     source_type: str
+    thumbnail_url: Optional[str] = None
     created_by: Optional[UUID] = None
     last_frame_at: Optional[datetime] = None
     last_seen_at: Optional[datetime] = None
