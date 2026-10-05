@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+import logging
 from app.core.database import get_db
 from app.models import Base
 from app.api.route import api_router
@@ -6,9 +7,9 @@ from contextlib import asynccontextmanager
 from app.core.database import engine
 from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
-
+from app.messaging.rabbitmq import rabbitmq_publisher
 from app.core.init_db import ensure_database_exists, seed_default_admin
-
+logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
 
@@ -20,18 +21,21 @@ async def lifespan(app: FastAPI):
         async with engine.connect() as connection:
             await connection.execute(text("SELECT 1"))
 
-        print(" PostgreSQL connected successfully")
+        logger.info(" PostgreSQL connected successfully")
 
         async with engine.begin() as connection:
             await connection.run_sync(Base.metadata.create_all)
 
-        print(" Database tables verified/created successfully")
+        logger.info(" Database tables verified/created successfully")
 
         # 3. Seed default Admin user
         await seed_default_admin()
-
+        await rabbitmq_publisher.connect()
     except Exception as e:
-        print(f"PostgreSQL initialization failed: {e}")
+        logger.error(f"PostgreSQL initialization failed: {e}")
+        logger.exception(
+            "RabbitMQ startup connection failed."
+        )
 
     yield
 

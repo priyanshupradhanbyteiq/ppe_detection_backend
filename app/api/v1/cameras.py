@@ -108,7 +108,36 @@ async def get_camera(
 ) -> CameraResponse:
     return await service.get_camera(camera_id)
 
+@router.post(
+    "/{camera_id}/start",
+    response_model=CameraResponse,
+)
+async def start_camera(
+    camera_id: UUID,
+    service: CameraService = Depends(
+        get_camera_service
+    ),
+):
 
+    return await service.start_camera(
+        camera_id
+    )
+
+
+@router.post(
+    "/{camera_id}/stop",
+    response_model=CameraResponse,
+)
+async def stop_camera(
+    camera_id: UUID,
+    service: CameraService = Depends(
+        get_camera_service
+    ),
+):
+
+    return await service.stop_camera(
+        camera_id
+    )
 @router.patch(
     "/{camera_id}",
     response_model=CameraResponse,
