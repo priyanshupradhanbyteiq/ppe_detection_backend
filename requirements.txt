@@ -12,3 +12,5 @@ passlib[bcrypt]
 opencv-python-headless
 numpy
 cloudinary
+aio-pika
+python-dotenv[cli]
