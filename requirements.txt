@@ -5,3 +5,10 @@ asyncpg
 pydantic-settings
 alembic
 email-validator
+python-multipart
+aiofiles
+python-jose[cryptography]
+passlib[bcrypt]
+opencv-python-headless
+numpy
+cloudinary

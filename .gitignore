@@ -102,3 +102,9 @@ celerybeat.pid
 # Docker overrides
 # ==============================
 docker-compose.override.yml
+
+# ==============================
+# Documentation / Notes
+# ==============================
+docs/
+does/
