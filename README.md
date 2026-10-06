@@ -4,16 +4,33 @@ FastAPI backend for users, authentication, camera registration, RTSP validation,
 and camera control. PostgreSQL stores application data. The API publishes camera
 commands to RabbitMQ, and a separate worker consumes them.
 
-The current worker manages camera state in memory. Fetching camera configuration,
-adding/removing DeepStream sources, inference, and publishing frame/status events
-are still placeholders in `app/deepstream_worker/camera_manager.py`. You can run
-the current command consumer without installing the NVIDIA DeepStream SDK.
+The worker runs one dynamic DeepStream pipeline with five camera slots. It reads
+camera configuration from PostgreSQL and stores sessions, runtime events, status
+history, frame timestamps/counts, and worker heartbeats. The current source chain
+supports H265 RTSP streams; inference is not yet connected.
+
+Camera creation defaults to `desired_state=STOPPED` and `status=OFFLINE`. Start
+and stop endpoints save `RUNNING` or `STOPPED` and publish a RabbitMQ wake-up.
+The worker reads the latest database state for each command, so delayed events
+do not reverse a newer request. A camera becomes `ONLINE` only after decoded
+frames arrive. Stop removes its source, closes its session, and sets `OFFLINE`.
+
+Every ten seconds the worker reconciles saved desired states, including after a
+restart or broker delivery failure. Source errors or thirty seconds without
+frames close the session with `ERROR`; requested running cameras retry after
+thirty seconds. Frame metrics are flushed every two seconds. Shutdown closes
+sessions while preserving desired state for the next startup.
+
+Only one worker process is supported per database. A PostgreSQL advisory lock
+prevents a second process from taking commands or changing camera ownership.
+Failed commands are preserved in `deepstream.camera.commands.failed`; database
+reconciliation retries the associated camera state.
 
 ## Requirements
 
 - Python 3.10 or newer.
 - PostgreSQL and RabbitMQ, either installed locally or running in Docker.
-- Linux or macOS for the worker's current signal handling.
+- Linux with the NVIDIA DeepStream SDK, GStreamer/PyGObject bindings, and a compatible GPU for the worker.
 - Optional Cloudinary credentials for thumbnail/image uploads.
 
 Run the following commands from `camera_recognization_backend/`.
@@ -53,18 +70,19 @@ python -c "import secrets; print(secrets.token_hex(32))"
 | `EXPIRE` | Access token lifetime in minutes | `1440` |
 | `REFRESH_EXPIRE` | Refresh token lifetime in minutes | `10080` |
 | `RABBITMQ_URL` | AMQP connection shared by the API and worker | `amqp://guest:guest@localhost:5672/` |
-| `CAMERA_COMMAND_EXCHANGE` | API's RabbitMQ topic exchange | `camera.commands` |
+| `CAMERA_COMMAND_EXCHANGE` | Shared RabbitMQ topic exchange | `camera.commands` |
+| `DEEPSTREAM_WORKER_NAME` | Stable worker identity | `deepstream-default` |
+| `CAMERA_RECONCILE_SECONDS` | Desired-state reconciliation interval | `10` |
+| `CAMERA_FRAME_TIMEOUT_SECONDS` | Maximum interval without decoded frames | `30` |
 | `CLOUDINARY_CLOUD_NAME` | Optional Cloudinary cloud name | Empty |
 | `CLOUDINARY_API_KEY` | Optional Cloudinary API key | Empty |
 | `CLOUDINARY_API_SECRET` | Optional Cloudinary API secret | Empty |
 
-Keep `CAMERA_COMMAND_EXCHANGE=camera.commands`: the worker currently hardcodes
-that exchange name. Set all three Cloudinary values to enable image uploads;
+The API and worker load the same `.env` configuration. Set all three Cloudinary values to enable image uploads;
 otherwise uploads are skipped. URL-encode special characters in connection URL
 usernames/passwords, such as `@` → `%40`.
 
-The API loads `.env` through Pydantic settings. The worker reads process
-environment variables; its launch command below loads `.env` explicitly.
+Run both processes from the backend directory so they resolve the same `.env`.
 
 ## 3. Start PostgreSQL and RabbitMQ
 
@@ -112,7 +130,10 @@ python -m alembic upgrade head
 python -m alembic current
 ```
 
-The current migration head is `j1k2l3`. API startup also calls
+The current migration head is `m4n5o6`. This revision creates runtime tables,
+adds indexes preventing duplicate active sessions/source assignments, and
+normalizes legacy `ACTIVE` desired states to `RUNNING`. It also adopts runtime
+tables already created by an earlier API startup without dropping their data. API startup also calls
 `Base.metadata.create_all()`, which does not record an Alembic revision. Applying
 the migration history first prevents an unversioned schema on a fresh database.
 
@@ -130,17 +151,19 @@ python -m alembic upgrade head
 In one terminal, from the backend directory with the virtual environment active:
 
 ```bash
-python -m dotenv -f .env run -- python app/deepstream_worker/main.py
+python -m app.deepstream_worker.main
 ```
 
-The worker uses script-local imports, so run this file directly using the command
-above. It declares the durable queue `deepstream.camera.commands`, binds it to
-`camera.commands` with `camera.*`, and logs `Listening for camera commands...`.
-Start it before issuing camera commands so the queue is available.
+Use the module command above so package imports resolve correctly. The worker
+starts its DeepStream pipeline, registers its database identity, recovers stale
+sessions, and restores requested cameras before accepting new commands. It
+declares `deepstream.camera.commands` and binds it to the configured exchange
+with `camera.*`. Start it before issuing commands for immediate processing.
 
 Supported events are `camera.created`, `camera.start`, `camera.stop`,
 `camera.updated`, `camera.restart`, and `camera.deleted`. Press `Ctrl+C` to stop
-the worker. Its in-memory camera state is lost when the process stops.
+the worker. Session/status history stays in PostgreSQL and running requests
+are restored on the next startup.
 
 ## 6. Start the API
 
@@ -183,7 +206,7 @@ testing command delivery without an accessible camera.
 
 - **`ModuleNotFoundError`**: activate `.venv` and reinstall with
   `python -m pip install -r requirements.txt`. `aio-pika` is needed by both the API
-  and worker; `python-dotenv[cli]` provides the worker's environment loader.
+  and worker. Both load configuration through Pydantic settings.
 - **Database connection/authentication errors**: check PostgreSQL readiness and
   the complete `DATABASE_URL`, including `/ppe_detection` (or your chosen database
   name). For an existing database, its credentials must match `.env`.
@@ -196,11 +219,12 @@ testing command delivery without an accessible camera.
   Stamping only records a revision; missing columns/tables must be reconciled
   before stamping.
 - **RabbitMQ connection errors or no worker messages**: check broker readiness,
-  load the same `RABBITMQ_URL` in both processes, keep the exchange name
-  `camera.commands`, and start the worker before publishing camera commands.
-- **Camera never becomes `ONLINE`**: the current worker accepts start commands
-  but has no DeepStream frame source yet. `ONLINE` requires a frame callback to
-  `mark_frame_received()`.
+  load the same `RABBITMQ_URL` and `CAMERA_COMMAND_EXCHANGE` in both processes.
+  If a publish fails, the saved desired state is picked up by reconciliation.
+- **Camera never becomes `ONLINE`**: inspect `camera_sessions.error_message` and
+  `camera_runtime_logs`. Ensure the camera serves H265 RTSP video and that the
+  GPU/DeepStream plugins can decode it. An OpenCV validation success does not
+  guarantee compatibility with the current H265-only worker.
 
 Stop the API and worker with `Ctrl+C`. To stop the example service containers:
 
@@ -209,3 +233,15 @@ docker stop bput-postgres bput-rabbitmq
 ```
 
 Their named volumes retain the PostgreSQL and RabbitMQ data.
+
+## Verify the lifecycle
+
+```bash
+python -m unittest discover -s ./tests -p 'test_camera_lifecycle.py' -v
+```
+
+These tests exercise SQL transactions using SQLite and fake streaming sources;
+they do not require a running camera, broker, or GPU. Start/stop API responses
+show the saved request and latest observed status; streaming changes happen
+asynchronously in the worker. `PATCH` can change the validated desired state,
+but runtime status is maintained by the worker and cannot be edited by clients.

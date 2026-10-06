@@ -39,6 +39,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    await rabbitmq_publisher.close()
     await engine.dispose()
 
 

@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 # ==========================================
@@ -24,8 +24,8 @@ class CameraBase(BaseModel):
 # ==========================================
 class CameraCreateRequest(CameraBase):
     rtsp_url: str = Field(..., min_length=1, max_length=500, description="RTSP Stream URL")
-    desired_state: str = Field("ACTIVE", description="Desired state: ACTIVE / STOPPED")
-    source_type: str = Field("RTSP_STREAM", description="Source: RTSP_STREAM or VIDEO_UPLOAD")
+    desired_state: Literal["RUNNING", "STOPPED"] = "STOPPED"
+    source_type: Literal["RTSP_STREAM", "VIDEO_UPLOAD"] = "RTSP_STREAM"
 
 
 class CameraUpdateRequest(BaseModel):
@@ -37,9 +37,17 @@ class CameraUpdateRequest(BaseModel):
     ppe_enabled: Optional[bool] = None
     fire_enabled: Optional[bool] = None
     smoke_enabled: Optional[bool] = None
-    desired_state: Optional[str] = None
-    status: Optional[str] = None
+    desired_state: Optional[Literal["RUNNING", "STOPPED"]] = None
     thumbnail_url: Optional[str] = None
+
+    model_config = ConfigDict(extra="forbid")
+
+    @field_validator("name", "rtsp_url", "desired_state", "ppe_enabled", "fire_enabled", "smoke_enabled", mode="before")
+    @classmethod
+    def reject_null(cls, value):
+        if value is None:
+            raise ValueError("This field cannot be null")
+        return value
 
 
 class CameraUploadRequest(BaseModel):

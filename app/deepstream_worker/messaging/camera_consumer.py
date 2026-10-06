@@ -1,5 +1,6 @@
 # deepstream_worker/messaging/camera_consumer.py
 
+import asyncio
 import json
 import logging
 
@@ -15,9 +16,13 @@ class CameraCommandConsumer:
         self,
         rabbitmq_url: str,
         camera_manager,
+        exchange_name: str = "camera.commands",
     ):
         self.rabbitmq_url = rabbitmq_url
         self.camera_manager = camera_manager
+        self.exchange_name = exchange_name
+        self.consumer_tag = None
+        self._active_handlers = set()
 
         self.connection = None
         self.channel = None
@@ -43,16 +48,18 @@ class CameraCommandConsumer:
         # Prevent one worker from taking too many
         # unacknowledged commands.
         await self.channel.set_qos(
-            prefetch_count=10
+            prefetch_count=1
         )
 
         self.exchange = (
             await self.channel.declare_exchange(
-                "camera.commands",
+                self.exchange_name,
                 aio_pika.ExchangeType.TOPIC,
                 durable=True,
             )
         )
+
+        await self.channel.declare_queue("deepstream.camera.commands.failed", durable=True)
 
         self.queue = (
             await self.channel.declare_queue(
@@ -75,7 +82,7 @@ class CameraCommandConsumer:
         if self.connection is None:
             await self.connect()
 
-        await self.queue.consume(
+        self.consumer_tag = await self.queue.consume(
             self.handle_message
         )
 
@@ -83,55 +90,55 @@ class CameraCommandConsumer:
             "Listening for camera commands..."
         )
 
-    async def handle_message(
-        self,
-        message: aio_pika.IncomingMessage,
-    ):
+    async def run(self, stop_event, retry_seconds=5):
+        """Broker outages must not stop the worker's DB reconciliation loop."""
+        while not stop_event.is_set():
+            try:
+                await self.start()
+                await stop_event.wait()
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("RabbitMQ unavailable; database reconciliation remains active")
+                try:
+                    await self.close()
+                except Exception:
+                    logger.exception("Could not close failed RabbitMQ connection")
+                self.connection = None
+                self.channel = None
+                self.exchange = None
+                self.queue = None
+                self.consumer_tag = None
+                try:
+                    await asyncio.wait_for(stop_event.wait(), timeout=retry_seconds)
+                except asyncio.TimeoutError:
+                    pass
 
-        async with message.process(
-            requeue=False
-        ):
-
-            payload = json.loads(
-                message.body.decode("utf-8")
-            )
-
-            event_id = payload.get(
-                "event_id"
-            )
-
-            event_type = payload.get(
-                "event_type"
-            )
-
-            camera_id = payload.get(
-                "camera_id"
-            )
-
-            if not event_type:
-                raise ValueError(
-                    "event_type missing"
-                )
-
-            if not camera_id:
-                raise ValueError(
-                    "camera_id missing"
-                )
-
-            logger.info(
-                "Camera command received. "
-                "event_id=%s "
-                "event_type=%s "
-                "camera_id=%s",
-                event_id,
-                event_type,
-                camera_id,
-            )
-
-            await self.dispatch(
-                event_type=event_type,
-                camera_id=camera_id,
-            )
+    async def handle_message(self, message: aio_pika.IncomingMessage):
+        task = asyncio.current_task()
+        self._active_handlers.add(task)
+        try:
+            async with message.process(requeue=True):
+                try:
+                    payload = json.loads(message.body.decode("utf-8"))
+                    event_type = payload.get("event_type")
+                    camera_id = payload.get("camera_id")
+                    if not event_type or not camera_id:
+                        raise ValueError("event_type and camera_id are required")
+                    await self.dispatch(event_type, camera_id)
+                except Exception:
+                    logger.exception("Camera command failed; preserving it in the failed queue")
+                    await self.channel.default_exchange.publish(
+                        aio_pika.Message(body=message.body, content_type="application/json",
+                                         delivery_mode=aio_pika.DeliveryMode.PERSISTENT,
+                                         message_id=message.message_id),
+                        routing_key="deepstream.camera.commands.failed", mandatory=True,
+                    )
+                    # DB reconciliation retries runtime failures. If parking the
+                    # command fails, the outer context requeues the original.
+        finally:
+            self._active_handlers.discard(task)
 
     async def dispatch(
         self,
@@ -184,6 +191,12 @@ class CameraCommandConsumer:
             )
 
     async def close(self):
+
+        if self.queue and self.consumer_tag:
+            await self.queue.cancel(self.consumer_tag)
+            self.consumer_tag = None
+        if self._active_handlers:
+            await asyncio.gather(*self._active_handlers, return_exceptions=True)
 
         if self.connection:
             await self.connection.close()

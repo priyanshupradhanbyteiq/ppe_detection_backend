@@ -81,31 +81,13 @@ class CameraService:
             )
 
         except Exception:
-
-            #
-            # IMPORTANT:
-            #
-            # Database operation has already succeeded.
-            #
-            # Because we're intentionally NOT using
-            # transactional outbox, we should not pretend
-            # that rolling back here would undo the camera.
-            #
-
+            # Desired state is durable. The worker periodically reconciles the
+            # DB, so broker outages delay processing without losing the request.
             logger.exception(
-                "Failed to publish camera event. "
-                "event_type=%s camera_id=%s",
-                event_type,
-                camera_id,
+                "Camera state saved, but immediate command delivery failed; "
+                "worker reconciliation will retry. event_type=%s camera_id=%s",
+                event_type, camera_id,
             )
-
-            #
-            # For your current implementation we're allowing
-            # the API operation to remain successful.
-            #
-            # Later you can add retry/outbox if guaranteed
-            # delivery is required.
-            #
 
     # =========================================================
     # VALIDATE RTSP
@@ -409,87 +391,21 @@ class CameraService:
             camera_id=camera_id,
         )
 
-    async def start_camera(
-    self,
-    camera_id: UUID,
-) -> CameraResponse:
-
-        camera = await self.repository.get_by_id(
-            camera_id
-        )
-
+    async def _set_desired_state(self, camera_id: UUID, desired_state: str, event_type: str) -> CameraResponse:
+        camera = await self.repository.get_by_id(camera_id)
         if not camera:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Camera with ID '{camera_id}' not found.",
-            )
-
-        # Idempotent start.
-        if camera.desired_state == "RUNNING":
-
-            logger.info(
-                "Camera already has desired_state=RUNNING. camera_id=%s",
-                camera_id,
-            )
-
-            return CameraResponse.model_validate(camera)
-
-        camera = await self.repository.update_desired_state(
-            camera_id=camera_id,
-            desired_state="RUNNING",
-        )
-
-        await self._publish_camera_event(
-            event_type="camera.start",
-            camera_id=camera_id,
-        )
-
-        logger.info(
-            "Camera start requested. camera_id=%s",
-            camera_id,
-        )
-
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                                detail=f"Camera with ID '{camera_id}' not found.")
+        if camera.desired_state != desired_state:
+            camera = await self.repository.update_desired_state(camera_id, desired_state)
+            if camera is None:
+                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Camera was deleted")
+        # Repeated requests also wake the worker after a previous delivery failure.
+        await self._publish_camera_event(event_type, camera_id)
         return CameraResponse.model_validate(camera)
 
+    async def start_camera(self, camera_id: UUID) -> CameraResponse:
+        return await self._set_desired_state(camera_id, "RUNNING", "camera.start")
 
-    async def stop_camera(
-        self,
-        camera_id: UUID,
-    ) -> CameraResponse:
-
-        camera = await self.repository.get_by_id(
-            camera_id
-        )
-
-        if not camera:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Camera with ID '{camera_id}' not found.",
-            )
-
-        # Idempotent stop.
-        if camera.desired_state == "STOPPED":
-
-            logger.info(
-                "Camera already has desired_state=STOPPED. camera_id=%s",
-                camera_id,
-            )
-
-            return CameraResponse.model_validate(camera)
-
-        camera = await self.repository.update_desired_state(
-            camera_id=camera_id,
-            desired_state="STOPPED",
-        )
-
-        await self._publish_camera_event(
-            event_type="camera.stop",
-            camera_id=camera_id,
-        )
-
-        logger.info(
-            "Camera stop requested. camera_id=%s",
-            camera_id,
-        )
-
-        return CameraResponse.model_validate(camera)
+    async def stop_camera(self, camera_id: UUID) -> CameraResponse:
+        return await self._set_desired_state(camera_id, "STOPPED", "camera.stop")

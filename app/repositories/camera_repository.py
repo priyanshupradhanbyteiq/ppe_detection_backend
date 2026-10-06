@@ -3,10 +3,11 @@
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.camera import Camera
+from app.models.camera_status_log import CameraStatusLog
 from app.schemas.camera import (
     CameraCreateRequest,
     CameraUpdateRequest,
@@ -49,6 +50,8 @@ class CameraRepository:
         )
 
         self.db.add(camera)
+        await self.db.flush()
+        self.db.add(CameraStatusLog(camera_id=camera.id, status=status))
 
         await self.db.commit()
         await self.db.refresh(camera)
@@ -132,20 +135,14 @@ class CameraRepository:
         desired_state: str,
     ) -> Optional[Camera]:
 
-            camera = await self.get_by_id(
-                camera_id
-            )
+        camera = await self.get_by_id(camera_id)
+        if not camera:
+            return None
+        camera.desired_state = desired_state
+        await self.db.commit()
+        await self.db.refresh(camera)
+        return camera
 
-            if not camera:
-                return None
-
-            camera.desired_state = desired_state
-
-            await self.db.commit()
-            await self.db.refresh(camera)
-
-            return camera
-    
     async def update_status(
         self,
         camera_id: UUID,
@@ -181,7 +178,9 @@ class CameraRepository:
         if not camera:
             return False
 
-        await self.db.delete(camera)
+        # Let database ON DELETE CASCADE remove runtime/history rows. ORM
+        # deletion would otherwise try to null their non-null camera_id fields.
+        await self.db.execute(delete(Camera).where(Camera.id == camera_id))
         await self.db.commit()
 
         return True
