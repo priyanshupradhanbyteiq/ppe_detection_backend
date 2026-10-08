@@ -1,7 +1,7 @@
 import logging
 
 import gi
-
+import time
 gi.require_version("Gst", "1.0")
 gi.require_version("GstRtsp", "1.0")
 
@@ -26,7 +26,11 @@ class CameraSourceBin:
         self.rtsp_url = rtsp_url
         self.on_frame = on_frame
         self.on_error = on_error
-
+        #Camera Reconnect State
+        self.frame_count = 0
+        self.last_frame_arrival = None
+        self.reconnect_delay = 2
+        
         self.bin = Gst.Bin.new(
             f"camera-source-{source_index}"
         )
@@ -190,9 +194,16 @@ class CameraSourceBin:
     # =====================================================
 
     def _on_frame(self, pad, info):
-        if info.get_buffer() is not None:
-            self.on_frame()
-        return Gst.PadProbeReturn.OK
+        buffer = info.get_buffer()
+
+        if buffer is None:
+            return Gst.PadProbeReturn.OK
+
+        self.frame_count += 1
+
+        self.last_frame_arrival = time.monotonic()
+
+
 
     def _on_pad_added(
         self,

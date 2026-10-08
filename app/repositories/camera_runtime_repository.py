@@ -142,3 +142,185 @@ class CameraRuntimeRepository:
             worker.heartbeat_at = datetime.now(timezone.utc)
             worker.current_cameras = current_cameras
             worker.status = "OFFLINE" if offline else "ONLINE"
+
+    async def get_or_create_worker(
+        self,
+        name,
+        max_cameras=5,
+    ):
+
+        async with self.session_factory() as db:
+
+            result = await db.execute(
+                select(
+                    DeepStreamWorker
+                ).where(
+                    DeepStreamWorker.name == name
+                )
+            )
+
+            worker = result.scalar_one_or_none()
+
+            if not worker:
+
+                worker = DeepStreamWorker(
+                    name=name,
+                    hostname=name,
+                    status="ONLINE",
+                    max_cameras=max_cameras,
+                    current_cameras=0,
+                    heartbeat_at=datetime.now(
+                        timezone.utc
+                    ),
+                )
+
+                db.add(worker)
+
+            else:
+
+                worker.status = "ONLINE"
+
+                worker.heartbeat_at = (
+                    datetime.now(
+                        timezone.utc
+                    )
+                )
+
+            await db.commit()
+            await db.refresh(worker)
+
+            return worker.id
+
+    # =====================================================
+    # CAMERA
+    # =====================================================
+
+    async def get_camera(
+        self,
+        camera_id,
+    ):
+
+        async with self.session_factory() as db:
+
+            return await db.get(
+                Camera,
+                UUID(str(camera_id)),
+            )
+
+    # =====================================================
+    # CREATE CAMERA SESSION
+    # =====================================================
+
+    async def create_session(
+        self,
+        camera_id,
+        worker_id,
+        pipeline_id,
+        source_index,
+        session_id=None,
+    ):
+
+        async with self.session_factory() as db:
+
+            session = CameraSession(
+                id=UUID(str(session_id)) if session_id is not None else None,
+                camera_id=UUID(
+                    str(camera_id)
+                ),
+                worker_id=worker_id,
+                pipeline_id=pipeline_id,
+                source_index=source_index,
+                status="CONNECTING",
+                started_at=datetime.now(
+                    timezone.utc
+                ),
+            )
+
+            db.add(session)
+
+            await db.flush()
+
+            camera = await db.get(Camera, UUID(str(camera_id)))
+            await self._transition(
+                db, camera, worker_id, session, "CONNECTING", "CAMERA_SOURCE_ASSIGNED",
+                f"Camera started on source {source_index}",
+            )
+
+            # Worker count
+            worker = await db.get(
+                DeepStreamWorker,
+                worker_id,
+            )
+
+            worker.current_cameras += 1
+
+            await db.commit()
+
+            await db.refresh(session)
+
+            return session
+
+    # =====================================================
+    # STOP SESSION
+    # =====================================================
+
+    async def stop_session(
+        self,
+        camera_id,
+        session_id,
+        worker_id,
+        pipeline_id,
+        source_index,
+    ):
+
+        async with self.session_factory() as db:
+
+            session = await db.get(
+                CameraSession,
+                UUID(str(session_id)),
+            )
+
+            if session:
+
+                session.status = "STOPPED"
+
+                session.stopped_at = (
+                    datetime.now(
+                        timezone.utc
+                    )
+                )
+
+            log = CameraRuntimeLog(
+                camera_id=UUID(
+                    str(camera_id)
+                ),
+                worker_id=worker_id,
+                session_id=UUID(
+                    str(session_id)
+                ),
+                pipeline_id=pipeline_id,
+                event_type="CAMERA_STOPPED",
+                old_status="RUNNING",
+                new_status="STOPPED",
+                message=(
+                    f"Camera stopped from "
+                    f"source {source_index}"
+                ),
+                metadata_json={
+                    "source_index":
+                        source_index
+                },
+            )
+
+            db.add(log)
+
+            worker = await db.get(
+                DeepStreamWorker,
+                worker_id,
+            )
+
+            if worker.current_cameras > 0:
+
+                worker.current_cameras -= 1
+
+            await db.commit()
