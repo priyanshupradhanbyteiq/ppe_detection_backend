@@ -96,6 +96,12 @@ class CameraRepository:
             result.scalars().all()
         )
 
+    async def get_all_cameras(self) -> List[Camera]:
+        result = await self.db.execute(
+            select(Camera).order_by(Camera.name.asc())
+        )
+        return list(result.scalars().all())
+
     # =========================================================
     # UPDATE
     # =========================================================

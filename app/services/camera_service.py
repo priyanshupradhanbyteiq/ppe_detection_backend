@@ -17,6 +17,9 @@ from app.repositories.camera_repository import (
 from app.schemas.camera import (
     CameraCreateRequest,
     CameraResponse,
+    CameraStatusItem,
+    CameraSummaryBreakdown,
+    CameraSummaryResponse,
     CameraUpdateRequest,
     RTSPValidateRequest,
     RTSPValidateResponse,
@@ -409,3 +412,54 @@ class CameraService:
 
     async def stop_camera(self, camera_id: UUID) -> CameraResponse:
         return await self._set_desired_state(camera_id, "STOPPED", "camera.stop")
+
+    async def get_camera_summary(self) -> CameraSummaryResponse:
+        cameras = await self.repository.get_all_cameras()
+
+        by_status: dict[str, int] = {}
+        by_desired_state: dict[str, int] = {}
+        camera_items: List[CameraStatusItem] = []
+
+        active_count = 0
+
+        for cam in cameras:
+            # Update status counts
+            status_val = cam.status or "OFFLINE"
+            desired_val = cam.desired_state or "STOPPED"
+            by_status[status_val] = by_status.get(status_val, 0) + 1
+            by_desired_state[desired_val] = by_desired_state.get(desired_val, 0) + 1
+
+            # Camera is considered active if online or actively running
+            is_active = (
+                status_val.upper() in ["ONLINE", "STREAMING", "RUNNING", "ACTIVE"]
+                or desired_val.upper() == "RUNNING"
+            )
+
+            if is_active:
+                active_count += 1
+
+            camera_items.append(
+                CameraStatusItem(
+                    id=cam.id,
+                    name=cam.name,
+                    status=status_val,
+                    desired_state=desired_val,
+                    is_active=is_active,
+                    location_name=cam.location_name,
+                    thumbnail_url=cam.thumbnail_url,
+                )
+            )
+
+        total = len(camera_items)
+        inactive_count = total - active_count
+
+        return CameraSummaryResponse(
+            total=total,
+            active_count=active_count,
+            inactive_count=inactive_count,
+            breakdown=CameraSummaryBreakdown(
+                by_status=by_status,
+                by_desired_state=by_desired_state,
+            ),
+            cameras=camera_items,
+        )

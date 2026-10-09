@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Literal, Optional
+from typing import Dict, List, Literal, Optional
 from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
@@ -112,4 +112,32 @@ class RTSPValidateResponse(BaseModel):
     fps: Optional[float] = Field(None, description="Stream frames per second")
     error: Optional[str] = Field(None, description="Error reason if stream failed validation")
     message: str = Field(..., description="Human-readable result summary")
+
+
+# ==========================================
+# CAMERA SUMMARY & STATUS SCHEMAS
+# ==========================================
+class CameraStatusItem(BaseModel):
+    id: UUID
+    name: str
+    status: str
+    desired_state: str
+    is_active: bool
+    location_name: Optional[str] = None
+    thumbnail_url: Optional[str] = None
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class CameraSummaryBreakdown(BaseModel):
+    by_status: Dict[str, int] = Field(default_factory=dict, description="Count of cameras per status")
+    by_desired_state: Dict[str, int] = Field(default_factory=dict, description="Count of cameras per desired state")
+
+
+class CameraSummaryResponse(BaseModel):
+    total: int = Field(..., description="Total number of registered cameras")
+    active_count: int = Field(..., description="Count of active cameras")
+    inactive_count: int = Field(..., description="Count of inactive cameras")
+    breakdown: CameraSummaryBreakdown = Field(..., description="Breakdown counts by status and desired state")
+    cameras: List[CameraStatusItem] = Field(default_factory=list, description="List of cameras with active status indicator")
 

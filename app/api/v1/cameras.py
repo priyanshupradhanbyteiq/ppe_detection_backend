@@ -16,6 +16,7 @@ from app.repositories.camera_repository import CameraRepository
 from app.schemas.camera import (
     CameraCreateRequest,
     CameraResponse,
+    CameraSummaryResponse,
     CameraUpdateRequest,
     RTSPValidateRequest,
     RTSPValidateResponse,
@@ -99,6 +100,18 @@ async def get_cameras(
     current_user = Depends(get_current_user),
 ) -> List[CameraResponse]:
     return await service.get_cameras(skip=skip, limit=limit)
+
+
+@router.get(
+    "/summary",
+    response_model=CameraSummaryResponse,
+    summary="Get cameras summary including total, active, and inactive counts",
+)
+async def get_cameras_summary(
+    service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user),
+) -> CameraSummaryResponse:
+    return await service.get_camera_summary()
 
 
 @router.get(
