@@ -97,11 +97,14 @@ class PPEEventRepository:
     @staticmethod
     def _apply_filters(
         query,
+        camera_id: Optional[UUID] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         event_type: Optional[str] = None,
         severity: Optional[str] = None,
     ):
+        if camera_id is not None:
+            query = query.where(PPEEvent.camera_id == camera_id)
         if start_date is not None:
             query = query.where(PPEEvent.first_observed_at >= start_date)
         if end_date is not None:
@@ -122,6 +125,7 @@ class PPEEventRepository:
     @staticmethod
     async def get_events(
         db,
+        camera_id: Optional[UUID] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         event_type: Optional[str] = None,
@@ -136,6 +140,7 @@ class PPEEventRepository:
         )
         query = PPEEventRepository._apply_filters(
             query,
+            camera_id=camera_id,
             start_date=start_date,
             end_date=end_date,
             event_type=event_type,
@@ -148,6 +153,7 @@ class PPEEventRepository:
     @staticmethod
     async def count_events(
         db,
+        camera_id: Optional[UUID] = None,
         start_date: Optional[datetime] = None,
         end_date: Optional[datetime] = None,
         event_type: Optional[str] = None,
@@ -156,6 +162,7 @@ class PPEEventRepository:
         query = select(func.count(PPEEvent.id)).outerjoin(Camera, PPEEvent.camera_id == Camera.id)
         query = PPEEventRepository._apply_filters(
             query,
+            camera_id=camera_id,
             start_date=start_date,
             end_date=end_date,
             event_type=event_type,
@@ -173,3 +180,14 @@ class PPEEventRepository:
         )
         result = await db.execute(query)
         return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_events_by_camera(db, camera_id: UUID) -> List[PPEEvent]:
+        query = (
+            select(PPEEvent)
+            .where(PPEEvent.camera_id == camera_id)
+            .options(selectinload(PPEEvent.camera))
+            .order_by(PPEEvent.confirmed_at.desc())
+        )
+        result = await db.execute(query)
+        return list(result.scalars().all())

@@ -1,5 +1,5 @@
 from datetime import date, datetime, time
-from typing import Optional, Union
+from typing import List, Optional, Union
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -91,6 +91,10 @@ def _parse_end_date(val: Optional[str]) -> Optional[datetime]:
     summary="List safety events filtered by Date Range, Event Type, and Severity",
 )
 async def list_events(
+    camera_id: Optional[UUID] = Query(
+        None,
+        description="Filter events by camera UUID",
+    ),
     start_date: Optional[str] = Query(
         None,
         description="Start date (e.g. 2026-10-10 or 2026-10-10T00:00:00Z)",
@@ -117,6 +121,7 @@ async def list_events(
 
     total = await PPEEventRepository.count_events(
         db=db,
+        camera_id=camera_id,
         start_date=parsed_start,
         end_date=parsed_end,
         event_type=event_type,
@@ -125,6 +130,7 @@ async def list_events(
 
     events = await PPEEventRepository.get_events(
         db=db,
+        camera_id=camera_id,
         start_date=parsed_start,
         end_date=parsed_end,
         event_type=event_type,
@@ -141,6 +147,20 @@ async def list_events(
         limit=limit,
         items=items,
     )
+
+
+@router.get(
+    "/camera/{camera_id}",
+    response_model=List[PPEEventResponse],
+    summary="Get all safety events for a specific camera ID",
+)
+async def get_camera_events(
+    camera_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_optional_current_user),
+) -> List[PPEEventResponse]:
+    events = await PPEEventRepository.get_events_by_camera(db=db, camera_id=camera_id)
+    return [_serialize_event(e) for e in events]
 
 
 @router.get(
