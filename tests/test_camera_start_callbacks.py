@@ -67,6 +67,48 @@ class CameraStartCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read_one(DeepStreamWorker).current_cameras, 1)
         self.read_one(CameraSession)
 
+    async def test_source_probe_forwards_real_buffers_and_persists_online_status(self):
+        try:
+            from app.deepstream_worker.camera_source import CameraSourceBin, Gst
+        except (ImportError, ValueError) as exc:
+            self.skipTest(f"GStreamer bindings unavailable: {exc}")
+
+        runtime = await self.manager.start_camera(self.camera_id)
+        # Feed CPU buffers through the actual PyGObject pad-probe bridge. GPU
+        # decoding and a live RTSP camera are unnecessary to verify the callback.
+        source = CameraSourceBin.__new__(CameraSourceBin)
+        source.camera_id = str(self.camera_id)
+        source.frame_count = 0
+        source.last_frame_arrival = None
+        source.on_frame = lambda: self.manager.notify_frame(source.camera_id, runtime["session_id"])
+        returns = []
+
+        def observe_return(pad, info):
+            result = source._on_frame(pad, info)
+            returns.append(result)
+            return result
+
+        Gst.init(None)
+        stream = Gst.parse_launch("fakesrc name=frames num-buffers=3 ! fakesink")
+        stream.get_by_name("frames").get_static_pad("src").add_probe(
+            Gst.PadProbeType.BUFFER, observe_return
+        )
+        try:
+            self.assertNotEqual(stream.set_state(Gst.State.PLAYING), Gst.StateChangeReturn.FAILURE)
+            message = stream.get_bus().timed_pop_filtered(
+                5 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR
+            )
+            self.assertIsNotNone(message)
+            self.assertEqual(message.type, Gst.MessageType.EOS)
+        finally:
+            stream.set_state(Gst.State.NULL)
+        await self.drain_callbacks()
+        self.assertEqual(returns, [Gst.PadProbeReturn.OK] * 3)
+        self.assertEqual(source.frame_count, 3)
+        self.assertIsNotNone(source.last_frame_arrival)
+        self.assertEqual(self.read_one(CameraSession).frames_processed, 3)
+        self.assertEqual(self.read_one(Camera).status, "ONLINE")
+
     async def test_database_failure_rolls_back_and_removes_source(self):
         with patch.object(self.repository, "_transition", AsyncMock(side_effect=RuntimeError("DB failed"))):
             with self.assertRaisesRegex(RuntimeError, "DB failed"):
@@ -126,6 +168,20 @@ class CameraStartCallbackTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.read_one(Camera).status, "ERROR")
         self.assertEqual(self.read_one(DeepStreamWorker).current_cameras, 0)
 
+    async def test_shutdown_stops_shared_pipeline_before_closing_camera_sessions(self):
+        await self.manager.start_camera(self.camera_id)
+        remove_camera = self.pipeline.remove_camera
+        with patch.object(self.pipeline, "shutdown", wraps=self.pipeline.shutdown) as shutdown:
+            def remove_after_shutdown(camera_id):
+                self.assertTrue(shutdown.called, "Live source removed before pipeline shutdown")
+                return remove_camera(camera_id)
+
+            with patch.object(self.pipeline, "remove_camera", side_effect=remove_after_shutdown):
+                await self.manager.shutdown()
+        self.assertEqual(self.manager.cameras, {})
+        self.assertEqual(self.read_one(CameraSession).status, "STOPPED")
+        self.assertEqual(self.read_one(DeepStreamWorker).current_cameras, 0)
+
 
 class PipelineCallbackTests(unittest.TestCase):
     def setUp(self):
@@ -143,6 +199,7 @@ class PipelineCallbackTests(unittest.TestCase):
         self.pipeline.streammux = Mock()
         self.pipeline.on_error = Mock()
         self.pipeline._update_tiler_layout = Mock()
+        self.pipeline.ppe_processor = Mock()
         self.source = Mock()
         self.source.bin.get_static_pad.return_value.link.return_value = Gst.PadLinkReturn.OK
         self.source.bin.sync_state_with_parent.return_value = True

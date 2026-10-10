@@ -31,6 +31,15 @@ class CameraManager:
         self._closing = False
         self.pipeline.on_error = self.notify_error
 
+    async def restore_cameras(self):
+        """Restore saved running cameras before consuming new commands."""
+        for camera in await self.repository.list_cameras():
+            if camera.desired_state == "RUNNING":
+                try:
+                    await self.start_camera(camera.id)
+                except Exception:
+                    logger.exception("Failed restoring camera %s", camera.id)
+
     # =====================================================
     # START CAMERA
     # =====================================================
@@ -85,6 +94,10 @@ class CameraManager:
             raise ValueError(
                 f"Camera not found: {camera_id}"
             )
+
+        if camera.desired_state != "RUNNING":
+            logger.info("Ignoring stale start command for stopped camera: %s", camera_id)
+            return
 
         logger.info(
             "Starting camera: %s",
@@ -151,6 +164,10 @@ class CameraManager:
             "last_frame_write": float("-inf"),
             "frame_write_pending": False,
         }
+
+        # Evidence persistence must not race the CameraSession foreign key.
+        if hasattr(self.pipeline, "activate_camera"):
+            self.pipeline.activate_camera(camera_id, str(session.id))
 
         logger.info(
             "Camera started: "
@@ -344,6 +361,10 @@ class CameraManager:
 
     async def shutdown(self):
         self._closing = True
+        # Stop the shared pipeline before dismantling individual live sources.
+        # Otherwise a source can wait for downstream streaming threads that
+        # are still blocked in the mux/tracker/display chain.
+        self.pipeline.shutdown()
         if self._callback_tasks:
             await asyncio.gather(*self._callback_tasks, return_exceptions=True)
 
@@ -365,5 +386,3 @@ class CameraManager:
                     "Failed stopping camera %s",
                     camera_id,
                 )
-
-        self.pipeline.shutdown()

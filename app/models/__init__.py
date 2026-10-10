@@ -12,8 +12,8 @@ from app.models.camera_status_log import CameraStatusLog  # noqa: E402
 from app.models.deepstream_worker import DeepStreamWorker  # noqa: E402
 from app.models.camera_session import CameraSession  # noqa: E402
 from app.models.camera_runtime_log import CameraRuntimeLog  # noqa: E402
-
+from app.models.ppe_event import PPEEvent  # noqa: E402
 __all__ = [
     "Base", "User", "Camera", "DetectionEvent", "CameraStatusLog",
-    "DeepStreamWorker", "CameraSession", "CameraRuntimeLog",
+    "DeepStreamWorker", "CameraSession", "CameraRuntimeLog", "PPEEvent",
 ]

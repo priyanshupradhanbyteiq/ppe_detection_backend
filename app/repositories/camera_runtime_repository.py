@@ -55,10 +55,18 @@ class CameraRuntimeRepository:
         ))
 
     async def initialize_worker(self, name, hostname, max_cameras):
-        """Called only while holding the deployment's exclusive worker lock."""
+        """Recover this worker's abandoned sessions while holding its process lock."""
         async with self.session_factory() as db, db.begin():
             now = datetime.now(timezone.utc)
+            worker = (await db.execute(select(DeepStreamWorker).where(
+                DeepStreamWorker.name == name
+            ))).scalar_one_or_none()
+            if worker is None:
+                worker = DeepStreamWorker(name=name, hostname=hostname)
+                db.add(worker)
+                await db.flush()
             sessions = (await db.execute(select(CameraSession).where(
+                CameraSession.worker_id == worker.id,
                 CameraSession.stopped_at.is_(None)
             ))).scalars().all()
             for session in sessions:
@@ -69,13 +77,6 @@ class CameraRuntimeRepository:
                 if camera:
                     await self._transition(db, camera, session.worker_id, session,
                                            "OFFLINE", "WORKER_RECOVERED", session.error_message)
-            await db.execute(update(DeepStreamWorker).values(status="OFFLINE", current_cameras=0))
-            worker = (await db.execute(select(DeepStreamWorker).where(
-                DeepStreamWorker.name == name
-            ))).scalar_one_or_none()
-            if worker is None:
-                worker = DeepStreamWorker(name=name, hostname=hostname)
-                db.add(worker)
             worker.hostname = hostname
             worker.max_cameras = max_cameras
             worker.current_cameras = 0
@@ -222,6 +223,12 @@ class CameraRuntimeRepository:
 
         async with self.session_factory() as db:
 
+            camera = await db.get(Camera, UUID(str(camera_id)))
+            if camera is None:
+                raise ValueError("Camera was deleted while starting")
+            if camera.desired_state != "RUNNING":
+                raise ValueError("Camera is no longer requested to run")
+
             session = CameraSession(
                 id=UUID(str(session_id)) if session_id is not None else None,
                 camera_id=UUID(
@@ -240,7 +247,6 @@ class CameraRuntimeRepository:
 
             await db.flush()
 
-            camera = await db.get(Camera, UUID(str(camera_id)))
             await self._transition(
                 db, camera, worker_id, session, "CONNECTING", "CAMERA_SOURCE_ASSIGNED",
                 f"Camera started on source {source_index}",

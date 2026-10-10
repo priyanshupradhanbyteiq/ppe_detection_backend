@@ -1,11 +1,18 @@
 import logging
+import platform
 import threading
+from datetime import datetime, timezone
+from pathlib import Path
 
 import gi
-
+import pyds
 gi.require_version("Gst", "1.0")
 
 from gi.repository import Gst, GLib
+
+import time
+
+from .ppe_processor import MultiCameraPPEProcessor
 
 from .camera_source import CameraSourceBin
 
@@ -22,7 +29,22 @@ class DynamicPipeline:
     DISPLAY_HEIGHT = 720
 
     def __init__(self):
+        config_dir = Path(__file__).resolve().parent / "model_configs"
+        pgie_config_path = config_dir / "config_pgie_ppe.txt"
+        tracker_config_path = config_dir / "config_tracker_NvSORT.yml"
+        tracker_lib_path = Path(
+            "/opt/nvidia/deepstream/deepstream/lib/libnvds_nvmultiobjecttracker.so"
+        )
+
+        for path in (pgie_config_path, tracker_config_path, tracker_lib_path):
+            if not path.is_file():
+                raise FileNotFoundError(f"Required DeepStream file not found: {path}")
+
         Gst.init(None)
+
+        self.ppe_processor = MultiCameraPPEProcessor(
+            max_queue_size=2000
+        )
 
         self.pipeline_id = self.PIPELINE_ID
         self.sources = {}
@@ -49,7 +71,24 @@ class DynamicPipeline:
             "nvstreammux",
             "streammux",
         )
-
+        self.pgie = self._make_element(
+            "nvinfer",
+            "ppe-primary-inference",
+        )
+        self.tracker = self._make_element(
+            "nvtracker",
+            "ppe-object-tracker",
+        )
+        # Preserve individual batched frames in RGBA before the tiler combines
+        # them. CPU evidence copies are made only for confirmed-event requests.
+        self.evidence_converter = self._make_element("nvvideoconvert", "ppe-evidence-converter")
+        self.evidence_caps = self._make_element("capsfilter", "ppe-evidence-rgba")
+        self.evidence_caps.set_property("caps", Gst.Caps.from_string(
+            "video/x-raw(memory:NVMM), format=RGBA"
+        ))
+        self._is_jetson = platform.machine() == "aarch64"
+        if not self._is_jetson:
+            self.evidence_converter.set_property("nvbuf-memory-type", 3)
         self.tiler = self._make_element(
             "nvmultistreamtiler",
             "tiler",
@@ -87,7 +126,27 @@ class DynamicPipeline:
         self.streammux.set_property("height", 720)
         self.streammux.set_property("live-source", True)
         self.streammux.set_property("batched-push-timeout", 40000)
+        self.pgie.set_property(
+            "config-file-path",
+            str(pgie_config_path),
+        )
 
+        self.pgie.set_property(
+            "batch-size",
+            self.MAX_CAMERAS,
+        )
+        self.tracker.set_property("tracker-width", 640)
+        self.tracker.set_property("tracker-height", 384)
+        self.tracker.set_property("gpu-id", 0)
+        self.tracker.set_property("ll-lib-file", str(tracker_lib_path))
+        self.tracker.set_property("ll-config-file", str(tracker_config_path))
+        # These properties are available only in older DeepStream plugins.
+        for name, value in (
+            ("enable-batch-process", True),
+            ("enable-past-frame", False),
+        ):
+            if self.tracker.find_property(name):
+                self.tracker.set_property(name, value)
         # Avoid downstream EOS after the final source ends,
         # where this property is supported.
         if self.streammux.find_property("drop-pipeline-eos"):
@@ -130,6 +189,10 @@ class DynamicPipeline:
 
         elements = [
             self.streammux,
+            self.pgie,
+            self.tracker,
+            self.evidence_converter,
+            self.evidence_caps,
             self.tiler,
             self.converter,
             self.capsfilter,
@@ -165,7 +228,25 @@ class DynamicPipeline:
             Gst.PadProbeType.BUFFER,
             self._display_probe,
         )
+        # PGIE output metadata probe
+        pgie_src_pad = self.pgie.get_static_pad("src")
 
+        if pgie_src_pad is None:
+            raise RuntimeError("Unable to get PGIE src pad")
+
+        pgie_src_pad.add_probe(
+            Gst.PadProbeType.BUFFER,
+            self._pgie_probe,
+        )
+        tracker_src_pad = self.evidence_caps.get_static_pad("src")
+
+        if tracker_src_pad is None:
+            raise RuntimeError("Unable to get tracker src pad")
+
+        tracker_src_pad.add_probe(
+            Gst.PadProbeType.BUFFER,
+            self._tracker_probe,
+        )
         # --------------------------------------------------
         # GStreamer bus
         # --------------------------------------------------
@@ -233,6 +314,17 @@ class DynamicPipeline:
                 "Check GStreamer errors and the display environment."
             )
 
+        self.ppe_processor.start()
+
+    def set_ppe_persistence(self, persistence):
+        self.ppe_processor.action_sink = persistence.submit
+        self.ppe_processor.snapshot_sink = (
+            persistence.submit_snapshot if persistence.snapshots.enabled else None
+        )
+
+    def activate_camera(self, camera_id, camera_session_id):
+        self.ppe_processor.activate_camera(camera_id, camera_session_id)
+
     def _run_loop(self):
         logger.info("DeepStream GLib loop started")
         self.loop.run()
@@ -287,8 +379,17 @@ class DynamicPipeline:
         source_pad = None
         added = False
         registered = False
+        decision_registered = False
 
         try:
+            self.ppe_processor.register_camera(
+                camera_id=camera_id,
+                session_id=session_id,
+                camera_session_id=session_id,
+                ready=False,
+            )
+            decision_registered = True
+
             # PyGObject's Gst.Bin.add() returns None on success and
             # raises on failure. Verify ownership instead of its return value.
             self.pipeline.add(source.bin)
@@ -355,6 +456,9 @@ class DynamicPipeline:
             return source_index
 
         except Exception:
+            if decision_registered:
+                self.ppe_processor.remove_camera(camera_id)
+
             source.bin.set_state(Gst.State.NULL)
 
             if source_pad is not None and mux_pad is not None:
@@ -390,7 +494,10 @@ class DynamicPipeline:
             logger.info("Camera not running: %s", camera_id)
             return False
 
-        return self._remove_camera_internal(camera_id)
+        removed = self._remove_camera_internal(camera_id)
+        if removed:
+            self.ppe_processor.remove_camera(camera_id)
+        return removed
 
     def _remove_camera_internal(self, camera_id):
         camera_id = str(camera_id)
@@ -551,6 +658,241 @@ class DynamicPipeline:
                 )
 
     # ======================================================
+    # PGIE PROBE
+    # ======================================================
+
+    def _pgie_probe(self, pad, info):
+
+        gst_buffer = info.get_buffer()
+
+        if gst_buffer is None:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(
+            hash(gst_buffer)
+        )
+
+        if batch_meta is None:
+            return Gst.PadProbeReturn.OK
+
+        frame_list = batch_meta.frame_meta_list
+
+        while frame_list is not None:
+
+            try:
+                frame_meta = pyds.NvDsFrameMeta.cast(
+                    frame_list.data
+                )
+            except StopIteration:
+                break
+
+            source_index = frame_meta.pad_index
+
+            camera_id = next(
+                (
+                    cid
+                    for cid, entry in self.sources.items()
+                    if entry["source_index"] == source_index
+                ),
+                None,
+            )
+
+            detections = []
+
+            obj_list = frame_meta.obj_meta_list
+
+            while obj_list is not None:
+
+                try:
+                    obj_meta = pyds.NvDsObjectMeta.cast(
+                        obj_list.data
+                    )
+                except StopIteration:
+                    break
+
+                if obj_meta.unique_component_id != 1:
+                    try:
+                        obj_list = obj_list.next
+                    except StopIteration:
+                        break
+                    continue
+
+                rect = obj_meta.rect_params
+
+                detection = {
+                    "class_id": int(obj_meta.class_id),
+                    "label": str(obj_meta.obj_label),
+                    "confidence": float(
+                        obj_meta.confidence
+                    ),
+                    "bbox": (
+                        float(rect.left),
+                        float(rect.top),
+                        float(rect.width),
+                        float(rect.height),
+                    ),
+                }
+
+                detections.append(detection)
+
+                try:
+                    obj_list = obj_list.next
+                except StopIteration:
+                    break
+
+            if detections:
+                logger.info(
+                    "PPE detections: camera=%s "
+                    "frame=%s objects=%s",
+                    camera_id,
+                    frame_meta.frame_num,
+                    detections,
+                )
+
+            try:
+                frame_list = frame_list.next
+            except StopIteration:
+                break
+
+        return Gst.PadProbeReturn.OK
+    # ======================================================
+    # TRACKER PROBE
+    # ======================================================
+
+    def _tracker_probe(self, pad, info):
+        gst_buffer = info.get_buffer()
+
+        if gst_buffer is None:
+            return Gst.PadProbeReturn.OK
+
+        batch_meta = pyds.gst_buffer_get_nvds_batch_meta(
+            hash(gst_buffer)
+        )
+
+        if batch_meta is None:
+            return Gst.PadProbeReturn.OK
+
+        frame_list = batch_meta.frame_meta_list
+
+        while frame_list is not None:
+            try:
+                frame_meta = pyds.NvDsFrameMeta.cast(
+                    frame_list.data
+                )
+            except StopIteration:
+                break
+
+            source_index = int(frame_meta.pad_index)
+
+            camera_id = next(
+                (
+                    cid
+                    for cid, entry in self.sources.items()
+                    if entry["source_index"] == source_index
+                ),
+                None,
+            )
+
+            detections = []
+            obj_list = frame_meta.obj_meta_list
+
+            while obj_list is not None:
+                try:
+                    obj_meta = pyds.NvDsObjectMeta.cast(
+                        obj_list.data
+                    )
+                except StopIteration:
+                    break
+
+                if obj_meta.unique_component_id == 1:
+                    rect = obj_meta.rect_params
+
+                    track_id = int(obj_meta.object_id)
+
+                    if track_id == (1 << 64) - 1:
+                        track_id = None
+
+                    detection = {
+                        "class_id": int(obj_meta.class_id),
+                        "track_id": track_id,
+                        "label": str(obj_meta.obj_label),
+                        "confidence": float(obj_meta.confidence),
+                        "bbox": (
+                            float(rect.left),
+                            float(rect.top),
+                            float(rect.width),
+                            float(rect.height),
+                        ),
+                    }
+
+                    detections.append(detection)
+
+                # Advance even when an object's component is filtered out.
+                try:
+                    obj_list = obj_list.next
+                except StopIteration:
+                    break
+
+            # Submit exactly one complete observation, including empty frames.
+            if camera_id is not None:
+                entry = self.sources.get(camera_id)
+
+                if entry is not None:
+                    timestamp = time.monotonic()
+                    observed_at = datetime.now(timezone.utc)
+                    self._capture_ppe_snapshot(gst_buffer, frame_meta, camera_id, entry["session_id"],
+                                               timestamp, observed_at, detections)
+                    accepted = self.ppe_processor.submit_frame(
+                        camera_id=camera_id,
+                        session_id=entry["session_id"],
+                        timestamp=timestamp,
+                        objects=detections,
+                        observed_at=observed_at,
+                    )
+
+                    if not accepted:
+                        logger.warning(
+                            "PPE observation queue full: camera=%s",
+                            camera_id,
+                        )
+
+            if camera_id is not None and detections:
+                logger.info(
+                    "Tracker detections: camera=%s frame=%s objects=%s",
+                    camera_id,
+                    frame_meta.frame_num,
+                    detections,
+                )
+
+            try:
+                frame_list = frame_list.next
+            except StopIteration:
+                break
+
+        return Gst.PadProbeReturn.OK
+
+    def _capture_ppe_snapshot(self, gst_buffer, frame_meta, camera_id, session_id,
+                              timestamp, observed_at, detections):
+        requests = self.ppe_processor.snapshot_requests(camera_id, session_id, timestamp, detections)
+        if not requests:
+            return
+        try:
+            import cv2
+            import numpy as np
+            surface = pyds.get_nvds_buf_surface(hash(gst_buffer), int(frame_meta.batch_id))
+            try:
+                # The owned copy survives buffer reuse and Jetson unmapping.
+                rgba = np.array(surface, copy=True, order="C")
+            finally:
+                if self._is_jetson:
+                    pyds.unmap_nvds_buf_surface(hash(gst_buffer), int(frame_meta.batch_id))
+            frame = cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGR)
+            for request in requests:
+                if self.ppe_processor.snapshot_sink(request, frame, observed_at):
+                    self.ppe_processor.complete_snapshot(request["event_id"])
+        except Exception:
+            logger.exception("PPE evidence capture failed: camera=%s", camera_id)
+    # ======================================================
     # GSTREAMER BUS
     # ======================================================
 
@@ -649,6 +991,9 @@ class DynamicPipeline:
 
         # Stop the pipeline before dismantling its sources.
         self.pipeline.set_state(Gst.State.NULL)
+
+        # Keep decision sessions alive until all accepted frames are processed.
+        self.ppe_processor.stop()
 
         for camera_id in list(self.sources):
             try:

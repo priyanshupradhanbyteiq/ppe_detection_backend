@@ -55,7 +55,7 @@ class CameraSourceBin:
         )
 
         self.depay = Gst.ElementFactory.make(
-            "rtph265depay",
+            "rtph264depay",
             f"depay-{source_index}",
         )
 
@@ -65,7 +65,7 @@ class CameraSourceBin:
         )
 
         self.parser = Gst.ElementFactory.make(
-            "h265parse",
+            "h264parse",
             f"parser-{source_index}",
         )
 
@@ -203,7 +203,12 @@ class CameraSourceBin:
 
         self.last_frame_arrival = time.monotonic()
 
+        try:
+            self.on_frame()
+        except Exception:
+            logger.exception("Frame callback failed: camera=%s", self.camera_id)
 
+        return Gst.PadProbeReturn.OK
 
     def _on_pad_added(
         self,
@@ -237,10 +242,10 @@ class CameraSourceBin:
         if media != "video":
             return
 
-        # For now H265 only.
-        if encoding != "H265":
+        # For now H264 only.
+        if encoding != "H264":
 
-            self.on_error(f"Unsupported RTSP codec: {encoding}; H265 is required")
+            self.on_error(f"Unsupported RTSP codec: {encoding}; H264 is required")
 
             return
 
