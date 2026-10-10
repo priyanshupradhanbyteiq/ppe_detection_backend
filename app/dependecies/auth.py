@@ -60,3 +60,29 @@ async def get_current_user(
         )
 
     return user
+
+
+async def get_optional_current_user(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security),
+    user_repository: UserRepository = Depends(get_user_repository),
+):
+    token = credentials.credentials if credentials else request.query_params.get("token")
+    if not token:
+        return None
+    if token.startswith("Bearer "):
+        token = token[7:].strip()
+    try:
+        payload = decode_token(token)
+        if payload.get("token_type") != "access":
+            return None
+        email = payload.get("email")
+        if not email:
+            return None
+        user = await user_repository.get_by_email(email)
+        if not user or payload.get("sub") != str(user.id):
+            return None
+        return user
+    except Exception:
+        return None
+
