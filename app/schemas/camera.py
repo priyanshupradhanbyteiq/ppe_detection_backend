@@ -138,6 +138,10 @@ class CameraSummaryResponse(BaseModel):
     total: int = Field(..., description="Total number of registered cameras")
     active_count: int = Field(..., description="Count of active cameras")
     inactive_count: int = Field(..., description="Count of inactive cameras")
+    ppe_event_count: int = Field(
+        ..., ge=0,
+        description="Total persisted PPE events across all cameras, including open and resolved events",
+    )
     breakdown: CameraSummaryBreakdown = Field(..., description="Breakdown counts by status and desired state")
     cameras: List[CameraStatusItem] = Field(default_factory=list, description="List of cameras with active status indicator")
 

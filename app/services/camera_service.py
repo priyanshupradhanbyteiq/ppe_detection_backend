@@ -415,6 +415,7 @@ class CameraService:
 
     async def get_camera_summary(self) -> CameraSummaryResponse:
         cameras = await self.repository.get_all_cameras()
+        ppe_event_count = await self.repository.get_ppe_event_count()
 
         by_status: dict[str, int] = {}
         by_desired_state: dict[str, int] = {}
@@ -457,6 +458,7 @@ class CameraService:
             total=total,
             active_count=active_count,
             inactive_count=inactive_count,
+            ppe_event_count=ppe_event_count,
             breakdown=CameraSummaryBreakdown(
                 by_status=by_status,
                 by_desired_state=by_desired_state,

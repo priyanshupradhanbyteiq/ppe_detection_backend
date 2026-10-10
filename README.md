@@ -555,7 +555,14 @@ while preserving session history. A PostgreSQL advisory lock keeps one worker
 process active for the deployment's shared camera command queue.
 
 PPE violations use `ppe_events`; the generic `detection_events` table remains
-unconnected. No frontend PPE event endpoint has been added.
+unconnected. The authenticated `GET /api/v1/cameras/summary` response includes
+`ppe_event_count`: the total persisted PPE occurrences across all cameras,
+including both `OPEN` and `RESOLVED` events. It counts event rows, rather than
+people or individual detection frames, and returns `0` when the table is empty.
+The dashboard's **Total PPE Events** card reads this field and refreshes every
+ten seconds while Live Updates is enabled. This total covers all stored history;
+the dashboard time filter does not restrict it. Event listings and charts do not
+yet read persisted PPE history.
 
 ## How to run
 
@@ -1039,6 +1046,16 @@ also check source/pad cleanup and need `gi`/`pyds`; they skip if imports are
 unavailable. The decoded-frame probe test feeds real GStreamer buffers and
 checks persisted frame counts and ONLINE status. These tests do not run real
 inference or validate live camera/GPU/display.
+
+Run the camera summary API tests:
+
+```bash
+python -m unittest discover -s ./tests -p 'test_camera_summary.py' -v
+```
+
+These two tests exercise the HTTP response with temporary SQLite rows and mocked
+authentication. They verify numeric zero counts and counting open/resolved PPE
+occurrences across multiple cameras, including repeat occurrences for a track.
 
 Run the worker startup recovery and ownership/cleanup tests:
 

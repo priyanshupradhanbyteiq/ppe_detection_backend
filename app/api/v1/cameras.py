@@ -105,7 +105,7 @@ async def get_cameras(
 @router.get(
     "/summary",
     response_model=CameraSummaryResponse,
-    summary="Get cameras summary including total, active, and inactive counts",
+    summary="Get camera counts and total persisted PPE events",
 )
 async def get_cameras_summary(
     service: CameraService = Depends(get_camera_service),

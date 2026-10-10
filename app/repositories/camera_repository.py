@@ -3,11 +3,12 @@
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.camera import Camera
 from app.models.camera_status_log import CameraStatusLog
+from app.models.ppe_event import PPEEvent
 from app.schemas.camera import (
     CameraCreateRequest,
     CameraUpdateRequest,
@@ -101,6 +102,10 @@ class CameraRepository:
             select(Camera).order_by(Camera.name.asc())
         )
         return list(result.scalars().all())
+
+    async def get_ppe_event_count(self) -> int:
+        result = await self.db.execute(select(func.count()).select_from(PPEEvent))
+        return result.scalar_one()
 
     # =========================================================
     # UPDATE
