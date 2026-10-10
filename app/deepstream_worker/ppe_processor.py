@@ -216,7 +216,7 @@ class MultiCameraPPEProcessor:
         )
         payload["camera_session_id"] = session.camera_session_id
         if self.action_sink is not None:
-            self.action_sink({"action": action["action"], "event": payload})
+            self.action_sink({**action, "event": payload})
 
         if action["action"] == "CREATED" and self.snapshot_sink is not None:
             with self.snapshot_lock:

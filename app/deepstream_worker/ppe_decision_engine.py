@@ -15,6 +15,17 @@ VIOLATION_TYPES = {
 
 
 class PPEEventEngine:
+    @staticmethod
+    def _transition(action, event):
+        """Emit a lifecycle notification for the persistence/WebSocket bridge.
+
+        The worker and API are separate processes. Persistence publishes this
+        transition only after its UTC event record commits to PostgreSQL.
+        Per-frame UPDATED actions do not create new notification popups.
+        """
+        return {"action": action, "notification_type": f"ppe.{action.lower()}",
+                "event": event.copy()}
+
     def __init__(
         self,
         window_seconds=1.5,
@@ -203,10 +214,7 @@ class PPEEventEngine:
         self.events.append(event)
         self.open_events[key] = event
 
-        return {
-            "action": "CREATED",
-            "event": event.copy(),
-        }
+        return self._transition("CREATED", event)
 
     def _update_event(
         self, event, timestamp, stats, confidence
@@ -220,7 +228,7 @@ class PPEEventEngine:
         event["present_count"] = stats["present"]
         event["unknown_count"] = stats["unknown"]
 
-        # Do not rewrite JSON on every frame.
+        # Refresh the existing event; per-frame updates do not open new alerts.
         return {
             "action": "UPDATED",
             "event": event.copy(),
@@ -236,10 +244,7 @@ class PPEEventEngine:
         event["resolved_at"] = timestamp
         event["resolution_reason"] = reason
 
-        return {
-            "action": "RESOLVED",
-            "event": event.copy(),
-        }
+        return self._transition("RESOLVED", event)
 
     def process(self, observation):
         """

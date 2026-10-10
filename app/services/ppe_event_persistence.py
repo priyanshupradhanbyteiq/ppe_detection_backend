@@ -22,6 +22,7 @@ from sqlalchemy.exc import ProgrammingError
 from app.models import Camera, PPEEvent
 from app.repositories.ppe_event_repository import PPEEventRepository
 from app.services.ppe_snapshot_service import PPESnapshotService
+from app.services.ppe_notifications import notify_event
 
 logger = logging.getLogger(__name__)
 TIME_FIELDS = ("first_observed_at", "confirmed_at", "last_observed_at", "resolved_at")
@@ -96,7 +97,21 @@ class PPEEventPersistence:
         if operation is None:
             raise ValueError(f"Unknown PPE action: {action['action']}")
         async with self.session_factory() as db, db.begin():
-            await operation(db, action["event"])
+            existing = await db.get(PPEEvent, UUID(str(action["event"]["id"])))
+            previous_status = existing.status if existing is not None else None
+            record = await operation(db, action["event"])
+            if record is not None:
+                # Replayed CREATE/RESOLVE jobs never produce duplicate alerts.
+                if existing is None:
+                    notification_action = "CREATED"
+                elif previous_status != record.status:
+                    notification_action = "RESOLVED"
+                elif action["action"] == "UPDATED" and record.status == "OPEN":
+                    notification_action = "UPDATED"
+                else:
+                    notification_action = None
+                if notification_action:
+                    await notify_event(db, record.id, notification_action)
 
     async def persist_actions(self, actions):
         for action in actions:
@@ -224,6 +239,7 @@ class PPEEventPersistence:
                     async with self.session_factory() as db, db.begin():
                         await self.repository.save_snapshot(db, event_id, **snapshot,
                                                             captured_at=datetime.fromisoformat(captured_at))
+                        await notify_event(db, event_id, "UPDATED")
                 with self.lock:
                     self.db.execute("DELETE FROM snapshots WHERE event_id = ?", (event_id,))
                     self.db.commit()

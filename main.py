@@ -9,6 +9,8 @@ from sqlalchemy import text
 from fastapi.middleware.cors import CORSMiddleware
 from app.messaging.rabbitmq import rabbitmq_publisher
 from app.core.init_db import ensure_database_exists, seed_default_admin
+from app.services.camera_webrtc_service import camera_webrtc_service
+from app.services.ppe_notifications import ppe_notification_hub
 logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -37,10 +39,14 @@ async def lifespan(app: FastAPI):
             "RabbitMQ startup connection failed."
         )
 
-    yield
-
-    await rabbitmq_publisher.close()
-    await engine.dispose()
+    await ppe_notification_hub.start()
+    try:
+        yield
+    finally:
+        await ppe_notification_hub.stop()
+        await camera_webrtc_service.shutdown()
+        await rabbitmq_publisher.close()
+        await engine.dispose()
 
 
 app = FastAPI(lifespan=lifespan)

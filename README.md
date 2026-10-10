@@ -561,8 +561,13 @@ including both `OPEN` and `RESOLVED` events. It counts event rows, rather than
 people or individual detection frames, and returns `0` when the table is empty.
 The dashboard's **Total PPE Events** card reads this field and refreshes every
 ten seconds while Live Updates is enabled. This total covers all stored history;
-the dashboard time filter does not restrict it. Event listings and charts do not
-yet read persisted PPE history.
+the dashboard time filter does not restrict it. The frontend Events page reads
+`GET /api/v1/events` with date, violation/type, severity, and pagination filters,
+and loads details from `GET /api/v1/events/{event_id}`. It refreshes every ten
+seconds while Live Updates is enabled and displays saved snapshots and lifecycle
+timestamps. Dates use the viewer's timezone; search filters only the current
+page. Missing snapshots/confidence display as unavailable. Dashboard trend and
+distribution charts still use demo data.
 
 ## How to run
 
@@ -1122,6 +1127,132 @@ that all existing tables, columns, constraints and indexes match revision
 head. Stamping records a version; it does not create missing schema objects.
 Reconcile mismatches before stamping.
 
+## Live camera detail preview (OpenCV + WebRTC)
+
+Opening the frontend `/cameras/:id` route automatically opens a muted live video
+preview for that registered camera. The API reads the camera's saved network
+source with OpenCV and sends video through `aiortc`. Multiple viewers of the same
+camera share one capture thread and latest-frame slot; each viewer has its own
+WebRTC connection. This is raw camera video; DeepStream detection overlays are
+not included. The preview runs independently of the detection worker.
+
+Install the updated API dependencies and restart the API in its Python environment:
+
+```bash
+python -m pip install -r requirements.txt
+python -m uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Authenticated signaling endpoints (under `/api/v1`):
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| GET | `/cameras/webrtc/config` | Configured browser ICE servers |
+| POST | `/cameras/{camera_id}/webrtc/offer` | `{session_id: UUID, type: "offer", sdp: string}` → SDP answer |
+| DELETE | `/cameras/{camera_id}/webrtc/{session_id}` | Release this user's preview; repeated close is safe |
+
+The browser submits a receive-only video offer after ICE gathering completes.
+Only the saved camera URL is used. Missing cameras return 404, unsupported sources
+or offers return 400, unreachable video returns 503, and negotiation timeouts
+return 504. Closing the view or clicking **Disconnect preview** releases the peer
+and, for the last viewer, the capture. A telemetry data-channel heartbeat expires
+abandoned previews after 45 seconds. **Reconnect preview** retries the connection.
+Existing Start/Stop buttons still command the detection worker; a successful Stop
+also disconnects this view, and Start reconnects it.
+
+Cards refresh every second from actual browser measurements: received FPS from
+frames decoded, video byterate from received-byte deltas, cumulative browser
+frames dropped, and network round-trip latency from the telemetry ping/pong
+(or the selected ICE candidate pair). Latency is not sensor-to-display delay.
+Missing measurements show `—`. Capture FPS, skipped source frames, codec, jitter
+and average jitter-buffer delay are also displayed. Source skips caused by the
+preview FPS limit are separate from browser drops.
+
+Preview settings are listed in `.env.example`. Defaults cap each preview at
+20 FPS and 1280 pixels wide, with at most 20 peers per API process. OpenCV capture
+retries an interrupted source and uses bounded open/read timeouts. After sustained
+frame loss the peer closes and the viewer can reconnect.
+
+`WEBRTC_ICE_SERVERS=[]` uses local network candidates for localhost/LAN access.
+For viewers across NAT, configure your STUN/TURN servers as a JSON array, for example
+`[{"urls":"turn:your-server:3478","username":"viewer","credential":"replace-me"}]`.
+The browser must access the frontend through localhost or HTTPS. Allow the API
+host's WebRTC UDP traffic, or use reachable TURN relay service; HTTP signaling
+alone does not carry video. The configured TURN credentials are delivered to
+authenticated viewers. Run one API worker for this local setup; multiple workers
+need sticky routing for signaling and session close because peer state is in memory.
+
+Verification:
+
+```bash
+PYTHONPATH=.:tests python -m unittest test_camera_webrtc -v
+# From ../frontend:
+npm run test:webrtc
+npm run build
+```
+
+The transport tests use synthetic OpenCV frames and real local WebRTC peers; they
+do not require live camera access or write to PostgreSQL.
+
+## PPE notifications and WebSocket popups
+
+The notification bell and `/notifications` page show the latest 100 real PPE events
+from PostgreSQL. Demo alerts, random event timers and the test-alert button have
+been removed. Read and dismiss preferences are stored per user in this browser;
+dismissal does not delete the saved PPE event.
+
+The delivery path is:
+
+```text
+PPEEventEngine CREATED / UPDATED / RESOLVED actions
+  -> processor UTC timestamps -> durable worker outbox
+  -> event transaction + PostgreSQL pg_notify('ppe_events', event ID + action)
+  -> API LISTEN connection -> /api/v1/events/ws -> notification center / popup
+```
+
+The engine emits lifecycle notification metadata on CREATED and RESOLVED actions.
+PostgreSQL notifications use the same transaction as the event write, so failed
+transactions do not show a popup. Replayed CREATE/RESOLVE outbox jobs are idempotent.
+The API reads the saved event and sends the same fields as the REST event endpoints,
+including camera/location, confidence, status, UTC timestamps and snapshot URL.
+Throttled updates and snapshot uploads refresh the existing notification.
+
+The browser opens `ws://` or `wss://` on the configured `VITE_API_URL` host at
+`/events/ws`. Its first message must be `{ "type": "auth", "token": ACCESS_TOKEN }`;
+tokens are not put in the URL. Invalid/expired access tokens close with code 4401,
+and unapproved origins close with 4403. Add deployed frontend origins to
+`WEBSOCKET_ALLOWED_ORIGINS` and allow WebSocket upgrade forwarding through the proxy.
+Install the updated requirements (`websockets` provides Uvicorn socket support),
+then restart both the API and DeepStream worker to load notification delivery.
+No database migration is required for this feature.
+
+After authentication the API sends `{ "type": "ready" }`, followed by
+`{ "type": "ppe_event", "action": "CREATED|UPDATED|RESOLVED", "event": {...} }`.
+The client sends a ping every 20 seconds; the API checks token expiry and idle
+connections. Both the database listener and browser reconnect automatically.
+A bounded slow-client queue requests REST resync rather than growing without limit.
+PostgreSQL LISTEN broadcasts across API processes, so each API worker can serve
+its own connected viewers.
+
+Event UUIDs identify notification rows and prevent repeated popups. Initial saved
+history loads silently. New CREATED events enter a popup queue; updates/resolutions
+refresh the existing row without adding another popup. Reconnect/resume loads recent
+history to catch missed occurrences. Popups stay for six seconds each, support
+dismissal, and **View** opens that event's details. Resync recovers the latest 100
+events; use the Events page for older history or longer disconnections. Read and
+dismiss preferences are local to the browser, not shared by server accounts/devices.
+
+Verification:
+
+```bash
+PYTHONPATH=.:tests python -m unittest test_ppe_notifications test_ppe_processing test_ppe_persistence -v
+# Optional real PostgreSQL test: private channels, no application table writes.
+PPE_TEST_POSTGRES=1 PYTHONPATH=.:tests python -m unittest test_ppe_notification_postgres -v
+# From ../frontend:
+npm run test:notifications
+npm run build
+```
+
 ## Current limitations
 
 These are implementation gaps, not features enabled by changing `.env`:
@@ -1139,7 +1270,7 @@ These are implementation gaps, not features enabled by changing `.env`:
   acknowledged. There is no declared failed-command queue/application-level retry.
 - Detection flags are stored but do not control per-camera pipeline branches.
   Fire/smoke inference, the generic `detection_events` table, frontend alerts,
-  video uploads and browser video output are not connected to this runtime.
+  video uploads and DeepStream overlays in browser video are not connected to this runtime.
 - Outbox admission is a synchronous local SQLite commit from the decision thread.
   Database/network writes are asynchronous, but disk failure can prevent durable
   admission and sustained outages can grow the outbox. Monitor storage capacity.
@@ -1153,7 +1284,7 @@ These are implementation gaps, not features enabled by changing `.env`:
   against site footage. `UNKNOWN` evidence alone does not resolve an open event
   while the person remains observed; `unknown_grace_seconds` is currently unused.
 - Evidence windows use a monotonic clock; PostgreSQL events use UTC datetimes.
-  Frontend event delivery and legacy JSON import are not implemented.
+  Legacy JSON import is not implemented.
 - User CRUD routes currently have no authentication dependency. Camera routes
   require authentication but do not enforce per-user ownership.
 
