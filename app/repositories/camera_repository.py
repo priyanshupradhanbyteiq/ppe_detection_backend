@@ -1,23 +1,39 @@
+# app/repositories/camera_repository.py
+
 from typing import List, Optional
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.camera import Camera
-from app.schemas.camera import CameraCreateRequest, CameraUpdateRequest
+from app.models.camera_status_log import CameraStatusLog
+from app.models.ppe_event import PPEEvent
+from app.schemas.camera import (
+    CameraCreateRequest,
+    CameraUpdateRequest,
+)
 
 
 class CameraRepository:
-    def __init__(self, db: AsyncSession):
+
+    def __init__(
+        self,
+        db: AsyncSession,
+    ):
         self.db = db
+
+    # =========================================================
+    # CREATE
+    # =========================================================
 
     async def create(
         self,
         camera_data: CameraCreateRequest,
-        status: str = "ONLINE",
+        status: str = "OFFLINE",
         created_by: Optional[UUID] = None,
     ) -> Camera:
+
         camera = Camera(
             name=camera_data.name,
             rtsp_url=camera_data.rtsp_url,
@@ -35,48 +51,147 @@ class CameraRepository:
         )
 
         self.db.add(camera)
+        await self.db.flush()
+        self.db.add(CameraStatusLog(camera_id=camera.id, status=status))
+
         await self.db.commit()
         await self.db.refresh(camera)
+
         return camera
 
-    async def get_by_id(self, camera_id: UUID) -> Optional[Camera]:
+    # =========================================================
+    # GET BY ID
+    # =========================================================
+
+    async def get_by_id(
+        self,
+        camera_id: UUID,
+    ) -> Optional[Camera]:
+
         result = await self.db.execute(
-            select(Camera).where(Camera.id == camera_id)
+            select(Camera).where(
+                Camera.id == camera_id
+            )
         )
+
         return result.scalar_one_or_none()
+
+    # =========================================================
+    # GET ALL
+    # =========================================================
 
     async def get_all(
         self,
         skip: int = 0,
         limit: int = 50,
     ) -> List[Camera]:
+
         result = await self.db.execute(
-            select(Camera).offset(skip).limit(limit)
+            select(Camera)
+            .order_by(Camera.created_at.desc())
+            .offset(skip)
+            .limit(limit)
+        )
+
+        return list(
+            result.scalars().all()
+        )
+
+    async def get_all_cameras(self) -> List[Camera]:
+        result = await self.db.execute(
+            select(Camera).order_by(Camera.name.asc())
         )
         return list(result.scalars().all())
+
+    async def get_ppe_event_count(self) -> int:
+        result = await self.db.execute(select(func.count()).select_from(PPEEvent))
+        return result.scalar_one()
+
+    # =========================================================
+    # UPDATE
+    # =========================================================
 
     async def update(
         self,
         camera_id: UUID,
         update_data: CameraUpdateRequest,
     ) -> Optional[Camera]:
-        camera = await self.get_by_id(camera_id)
+
+        camera = await self.get_by_id(
+            camera_id
+        )
+
         if not camera:
             return None
 
-        update_dict = update_data.model_dump(exclude_unset=True)
-        for key, value in update_dict.items():
-            setattr(camera, key, value)
+        update_dict = update_data.model_dump(
+            exclude_unset=True
+        )
 
+        for key, value in update_dict.items():
+            setattr(
+                camera,
+                key,
+                value,
+            )
+
+        await self.db.commit()
+        await self.db.refresh(camera)
+
+        return camera
+
+    async def update_desired_state(
+        self,
+        camera_id: UUID,
+        desired_state: str,
+    ) -> Optional[Camera]:
+
+        camera = await self.get_by_id(camera_id)
+        if not camera:
+            return None
+        camera.desired_state = desired_state
         await self.db.commit()
         await self.db.refresh(camera)
         return camera
 
-    async def delete(self, camera_id: UUID) -> bool:
-        camera = await self.get_by_id(camera_id)
+    async def update_status(
+        self,
+        camera_id: UUID,
+        camera_status: str,
+    ) -> Optional[Camera]:
+
+        camera = await self.get_by_id(
+            camera_id
+        )
+
+        if not camera:
+            return None
+
+        camera.status = camera_status
+
+        await self.db.commit()
+        await self.db.refresh(camera)
+
+        return camera
+    # =========================================================
+    # DELETE
+    # =========================================================
+
+    async def delete(
+        self,
+        camera_id: UUID,
+    ) -> bool:
+
+        camera = await self.get_by_id(
+            camera_id
+        )
+
         if not camera:
             return False
 
-        await self.db.delete(camera)
+        # Let database ON DELETE CASCADE remove runtime/history rows. ORM
+        # deletion would otherwise try to null their non-null camera_id fields.
+        await self.db.execute(delete(Camera).where(Camera.id == camera_id))
         await self.db.commit()
+
         return True

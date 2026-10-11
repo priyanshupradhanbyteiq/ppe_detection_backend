@@ -1,5 +1,6 @@
 fastapi
 uvicorn
+websockets
 sqlalchemy
 asyncpg
 pydantic-settings
@@ -10,5 +11,8 @@ aiofiles
 python-jose[cryptography]
 passlib[bcrypt]
 opencv-python-headless
+aiortc>=1.14,<2
 numpy
 cloudinary
+aio-pika
+python-dotenv[cli]

@@ -6,6 +6,9 @@ __pycache__/
 *$py.class
 *.so
 
+# TensorRT engine caches are built for the local GPU/runtime.
+*.engine
+
 # ==============================
 # Virtual Environments
 # ==============================
@@ -19,6 +22,7 @@ ENV/
 # ==============================
 .env
 .env.*
+!.env.example
 
 
 # ==============================
@@ -73,6 +77,11 @@ logs/
 *.db
 *.sqlite
 *.sqlite3
+*.sqlite3-wal
+*.sqlite3-shm
+
+# Captured PPE evidence is staged locally until its Cloudinary upload commits.
+data/ppe_snapshots/
 
 # ==============================
 # Uploads / Temporary Files

@@ -16,12 +16,13 @@ from app.repositories.camera_repository import CameraRepository
 from app.schemas.camera import (
     CameraCreateRequest,
     CameraResponse,
+    CameraSummaryResponse,
     CameraUpdateRequest,
     RTSPValidateRequest,
     RTSPValidateResponse,
 )
 from app.services.camera_service import CameraService
-
+from app.dependecies.auth import get_current_user
 router = APIRouter(
     tags=["Cameras"],
 )
@@ -42,10 +43,12 @@ def get_camera_service(
     response_model=RTSPValidateResponse,
     status_code=status.HTTP_200_OK,
     summary="Probe and validate an RTSP/Video Stream URL",
+
 )
 async def validate_rtsp_stream(
     payload: RTSPValidateRequest,
     service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user),
 ) -> RTSPValidateResponse:
     """
     Connects to the provided RTSP URL using OpenCV in the background,
@@ -73,6 +76,7 @@ async def create_camera(
     payload: CameraCreateRequest,
     verify_stream: bool = Query(default=True, description="Verify RTSP stream connectivity before saving"),
     service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user),
 ) -> CameraResponse:
     """
     Creates a new Camera entity in PostgreSQL.
@@ -93,8 +97,21 @@ async def get_cameras(
     skip: int = Query(default=0, ge=0),
     limit: int = Query(default=50, ge=1, le=100),
     service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user),
 ) -> List[CameraResponse]:
     return await service.get_cameras(skip=skip, limit=limit)
+
+
+@router.get(
+    "/summary",
+    response_model=CameraSummaryResponse,
+    summary="Get camera counts and total persisted PPE events",
+)
+async def get_cameras_summary(
+    service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user),
+) -> CameraSummaryResponse:
+    return await service.get_camera_summary()
 
 
 @router.get(
@@ -105,10 +122,42 @@ async def get_cameras(
 async def get_camera(
     camera_id: UUID,
     service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user),
 ) -> CameraResponse:
     return await service.get_camera(camera_id)
 
+@router.post(
+    "/{camera_id}/start",
+    response_model=CameraResponse,
+)
+async def start_camera(
+    camera_id: UUID,
+    service: CameraService = Depends(
+        get_camera_service
+    ),
+    current_user = Depends(get_current_user),
+):
 
+    return await service.start_camera(
+        camera_id
+    )
+
+
+@router.post(
+    "/{camera_id}/stop",
+    response_model=CameraResponse,
+)
+async def stop_camera(
+    camera_id: UUID,
+    service: CameraService = Depends(
+        get_camera_service
+    ),
+    current_user = Depends(get_current_user)
+):
+
+    return await service.stop_camera(
+        camera_id
+    )
 @router.patch(
     "/{camera_id}",
     response_model=CameraResponse,
@@ -118,6 +167,7 @@ async def update_camera(
     camera_id: UUID,
     payload: CameraUpdateRequest,
     service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user)
 ) -> CameraResponse:
     return await service.update_camera(camera_id, payload)
 
@@ -130,6 +180,7 @@ async def update_camera(
 async def delete_camera(
     camera_id: UUID,
     service: CameraService = Depends(get_camera_service),
+    current_user = Depends(get_current_user)
 ):
     await service.delete_camera(camera_id)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

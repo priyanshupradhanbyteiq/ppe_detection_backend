@@ -53,6 +53,7 @@ async def get_users(
 async def get_user(
     user_id: UUID,
     service: UserService = Depends(get_user_service),
+    
 ):
     return await service.get_user(user_id)
 
