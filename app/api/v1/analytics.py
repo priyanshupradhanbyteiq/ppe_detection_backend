@@ -7,11 +7,44 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.dependecies.auth import get_optional_current_user
 from app.repositories.analytics_repository import AnalyticsRepository
-from app.schemas.analytics import EventsTrendResponse
+from app.schemas.analytics import AnalyticsOverviewResponse, EventsTrendResponse
 
 router = APIRouter(
     tags=["Analytics"],
 )
+
+
+@router.get(
+    "/overview",
+    response_model=AnalyticsOverviewResponse,
+    summary="Get full analytics overview (KPI stats, events trend, events by location)",
+)
+@router.get(
+    "",
+    response_model=AnalyticsOverviewResponse,
+    include_in_schema=False,
+)
+async def get_analytics_overview(
+    time_range: str = Query(
+        "Last 7 Days",
+        description="Time range filter: 'Last 7 Days', 'Last 24 Hours', 'Last 30 Days', 'Today'",
+    ),
+    camera_id: Optional[UUID] = Query(
+        None,
+        description="Filter analytics for a specific camera UUID",
+    ),
+    db: AsyncSession = Depends(get_db),
+    current_user=Depends(get_optional_current_user),
+) -> AnalyticsOverviewResponse:
+    """
+    Returns aggregated analytics KPI stats, stacked event trends, and events by location
+    for the Safe Lens Analytics dashboard page.
+    """
+    return await AnalyticsRepository.get_overview(
+        db=db,
+        time_range=time_range,
+        camera_id=camera_id,
+    )
 
 
 @router.get(
